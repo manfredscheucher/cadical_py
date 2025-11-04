@@ -317,7 +317,12 @@ def run_graph_enum(n: int) -> tuple[int, int]:
 
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+    if len(sys.argv) == 2:
+        n = int(sys.argv[1])
+    else:
+        print(f"Usage: {sys.argv[0]} n [k]")
+        sys.exit(1)
+        
     sols, calls = run_graph_enum(n)
     print(f"{sols} solutions")
     print(f"propagate_calls: {calls}")
