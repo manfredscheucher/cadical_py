@@ -1,7 +1,6 @@
-# choose_k_prop.py
 from collections import deque
 from typing import List, Tuple, Dict, Set
-import cadipy
+import cadical_py
 
 def binom(n: int, k: int) -> int:
     if k > n: return 0
@@ -143,7 +142,7 @@ class ChooseKPropPy:
 
 # ---- runner (example) ----
 def run_choose_k(n: int, k: int) -> None:
-    solver = cadipy.Solver()
+    solver = cadical_py.Solver()
     prop = ChooseKPropPy(n, k)
     solver.connect_external_propagator(prop)
     for v in range(1, n + 1):

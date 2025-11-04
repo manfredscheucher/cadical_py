@@ -1,38 +1,9 @@
-# graphsym.py
-# Symmetry propagator (colex-minimal adjacency) implemented in Python.
-# Uses external-clause streaming (cb_has_external_clause / cb_add_external_clause_lit)
-# so the main loop never calls S.add(...) directly — same pattern as your ChooseK example.
-#
-# Requires your pybind11 module `cadipy` that exposes:
-#   - Solver()
-#   - Solver.connect_external_propagator(py_obj_with_callbacks)
-#   - Solver.add_observed_var(v:int)
-#   - Solver.solve() -> int  (10 = SAT, 20 = UNSAT)
-#
-# The solver will call these methods on the attached Python object (duck-typed):
-#   - init(self, solver)
-#   - notify_new_decision_level(self)
-#   - notify_backtrack(self, new_level:int)
-#   - notify_assignment(self, lits:list[int])
-#   - cb_propagate(self) -> int
-#   - cb_add_reason_clause_lit(self, propagated_lit:int) -> int
-#   - cb_decide(self) -> int
-#   - cb_check_found_model(self, model:list[int]) -> bool
-#   - cb_has_external_clause(self) -> tuple[bool, bool]
-#   - cb_add_external_clause_lit(self) -> int
-#
-# Usage:
-#   python graphsym.py 5
-# Expected:
-#   34 solutions
-#   propagate_calls: <nonnegative integer>
-
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Tuple
 import sys
 
-import cadipy  # your pybind11 module
+import cadical_py
 
 
 # ---------- Combinatorics / Helpers ----------
@@ -319,7 +290,7 @@ def run_graph_enum(n: int) -> tuple[int, int]:
 
     m = n * (n - 1) // 2
 
-    S = cadipy.Solver()
+    S = cadical_py.Solver()
     P = GraphProp(n)
     S.connect_external_propagator(P)
     P.init(S)
