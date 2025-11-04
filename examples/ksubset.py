@@ -156,4 +156,13 @@ def run_choose_k(n: int, k: int) -> None:
             print("UNKNOWN")
             return
         # on SAT: cb_check_found_model handles counting + blocking
+
     print(f"{prop.solutions} solutions; expected C({n},{k}) = {binom(n,k)}")
+
+
+
+if __name__ == "__main__":
+    import sys
+    n = int(sys.argv[1])
+    k = int(sys.argv[2])
+    run_choose_k(n,k)
