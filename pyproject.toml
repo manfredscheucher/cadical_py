@@ -1,0 +1,23 @@
+[build-system]
+requires = ["scikit-build-core>=0.8", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cadical_py"
+version = "0.1.0"
+description = "Python bindings for CaDiCaL ExternalPropagator"
+readme = "README.md"
+authors = [{ name = "Manfred Scheucher" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux"
+]
+
+[tool.scikit-build]
+wheel.expand-macos-universal-tags = false
+build-dir = "build/{cache_tag}"
+cmake.args = []  # leer lassen, wir lesen CADICAL aus der Umgebung
