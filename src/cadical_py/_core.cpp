@@ -77,7 +77,7 @@ struct Solver {
   // expose a bit more if you need it later
 };
 
-PYBIND11_MODULE(cadipy, m) {
+PYBIND11_MODULE(_core, m) {
   m.doc() = "Python bridge to CaDiCaL ExternalPropagator";
   py::class_<Solver>(m, "Solver")
     .def(py::init<>())
