@@ -58,13 +58,12 @@ class KSubset(ExternalPropagator):
     def cb_propagate(self) -> int: 
         return self.q.popleft() if self.q else 0
 
-    # FIX 1: return the popped literal, and only clear state; next call returns 0
     def cb_add_reason_clause_lit(self, propagated_lit: int) -> int:
         cls = self.reason_of.get(propagated_lit)
         if not cls: return 0
-        lit = cls.pop()
+        lit = cls.pop()                   # <-- give last literal too
         if not cls: self.reason_of.pop(propagated_lit, None)
-        return lit
+        return lit                        # next call will return 0
 
     def cb_check_found_model(self, model: List[int]) -> bool:
         t = sum(1 for v in range(1, self.n + 1) if model[v-1] > 0)
