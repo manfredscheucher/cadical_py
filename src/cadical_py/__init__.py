@@ -1,2 +1,3 @@
 from ._core import Solver
-__all__ = ["Solver"]
+from .propagator import ExternalPropagator
+__all__ = ["Solver", "ExternalPropagator"]

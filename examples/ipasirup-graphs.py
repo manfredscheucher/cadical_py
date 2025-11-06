@@ -1,328 +1,250 @@
-from collections import deque
-from dataclasses import dataclass
-from typing import List, Tuple
-import sys
+# examples/ipasirup-graphs.py — same logic as PySAT version, using cadical_py
+from itertools import combinations
+from sys import argv
 
-import cadical_py
+from cadical_py import Solver, ExternalPropagator
 
+n = int(argv[1])
 
-# ---------- Combinatorics / Helpers ----------
+vars_ids = {i: I for (i, I) in enumerate(combinations(range(n), 2), 1)}
+rev_vars = {I: i for (i, I) in enumerate(combinations(range(n), 2), 1)}
+for i, j in combinations(range(n), 2):
+    rev_vars[j, i] = rev_vars[i, j]  # undirected graph = symmetric adjacency matrix
+assert all(rev_vars[vars_ids[i]] == i for i in vars_ids)
 
-@dataclass
-class EdgeMap:
-    """Bidirectional mapping between undirected edges (i<j) and var IDs 1..m for a graph with n vertices."""
-    n: int
-
-    def __post_init__(self):
-        self.id2edge: List[Tuple[int, int]] = [(0, 0)] * (self.n * (self.n - 1) // 2 + 1)  # 1-based
-        self.edge2id: dict[Tuple[int, int], int] = {}
-        id_ = 1
-        for i in range(self.n):
-            for j in range(i + 1, self.n):
-                self.id2edge[id_] = (i, j)
-                # Undirected: store both orientations
-                self.edge2id[(i, j)] = id_
-                self.edge2id[(j, i)] = id_
-                id_ += 1
-
-    def id_of(self, i: int, j: int) -> int:
-        return self.edge2id.get((i, j), 0)
+check_model_calls = 0
+propagate_calls = 0
 
 
-def colex_pairs(k: int) -> List[Tuple[int, int]]:
-    """Colex order of 2-combinations over {0..k-1}: (0,1),(0,2),(1,2),(0,3),(1,3),(2,3),…"""
-    out = []
-    for j in range(1, k):
-        for i in range(0, j):
-            out.append((i, j))
-    return out
+def is_symmetric(A):
+    n_ = len(A)
+    return all(A[r][c] == A[c][r] for c in range(n_) for r in range(n_))
 
 
-def permute_sub(A: List[List[int]], perm: List[int]) -> List[List[int]]:
-    """Return the perm×perm submatrix (rows/cols permuted by 'perm'). Values: -1 unset, 0 false, 1 true."""
+def permute(A, perm):
+    assert all(x in range(len(A)) for x in perm)
+    return [[A[r][c] for c in perm] for r in perm]
+
+
+def combinations_colex_ordered(L, r):
+    return list(reversed([tuple(reversed(I)) for I in combinations(reversed(L), r)]))
+
+
+def fingerprint(A):
+    return [A[i][j] for i, j in combinations_colex_ordered(range(len(A)), 2)]
+
+
+def replace(L, oldvalue, newvalue):
+    return [(newvalue if x == oldvalue else x) for x in L]
+
+
+def minCheck(A, perm=tuple()):
+    if not perm:
+        assert is_symmetric(A)
     k = len(perm)
-    B = [[0] * k for _ in range(k)]
-    for rr in range(k):
-        for cc in range(k):
-            B[rr][cc] = A[perm[rr]][perm[cc]]
-    return B
+    n_ = len(A)
+    A_ = permute(A, range(k))  # restrict to first k rows and columns
+    B_ = permute(A, perm)      # restrict to k rows and columns from permutation
+    A_fp = fingerprint(A_)
+    B_fp = fingerprint(B_)
+    A_fp = replace(A_fp, None, 0)  # unset in original are assumed zeros (best case)
+    B_fp = replace(B_fp, None, 1)  # unset in permuted are assumed ones (worst case)
+    assert len(A_fp) == len(B_fp)
+
+    if B_fp > A_fp:
+        return
+
+    if k == n_:
+        if B_fp < A_fp:  # omit identity
+            order_A = combinations_colex_ordered(range(k), 2)
+            order_B = combinations_colex_ordered(perm, 2)
+            assert all(y == (perm[x[0]], perm[x[1]]) for x, y in zip(order_A, order_B))
+
+            must_be_positive = set()
+            must_be_negative = set()
+            found = False
+            for l in range(len(B_fp)):
+                if B_fp[l] == 0:
+                    must_be_positive.add(rev_vars[order_B[l]])
+                if A_fp[l] == 1:
+                    must_be_negative.add(rev_vars[order_A[l]])
+                if B_fp[l] != A_fp[l]:
+                    assert (B_fp[l] == 0 and A_fp[l] == 1)
+                    yield perm, must_be_positive, must_be_negative
+                    found = True
+                    break
+
+            assert found
+    else:
+        assert k < n_
+        for v in range(n_):
+            if v not in perm:
+                yield from minCheck(A, perm + (v,))
 
 
-def fingerprint_colex(M: List[List[int]]) -> List[int]:
-    """Fingerprint of the upper triangle in colex order."""
-    k = len(M)
-    fp = []
-    for (i, j) in colex_pairs(k):
-        fp.append(M[i][j])
-    return fp
-
-
-def replace_unset(L: List[int], newvalue: int) -> List[int]:
-    """Replace -1 (unset) by newvalue (0/1)."""
-    return [newvalue if x < 0 else x for x in L]
-
-
-# ---------- Propagator ----------
-
-class GraphProp:
-    """
-    Enforces colex-minimal adjacency under permutations.
-    On violation, produces a unit implication with a reason clause.
-    Blocks each found model via external clause streaming (like your ChooseK example).
-    """
-
-    def __init__(self, n: int):
-        self.S = None
-        self.n = int(n)
-        self.edges = EdgeMap(self.n)
-
-        # Assignment tracking
+class GraphPropagator(ExternalPropagator):
+    def __init__(self, n_):
+        super().__init__()
+        self.n = n_
         self.level = 0
-        self.assigned_lits_at_level = [set()]  # signed literals per level
-        self.reason_lits_at_level = [set()]
-        self.pos_ids: set[int] = set()         # edge IDs currently TRUE
-        self.neg_ids: set[int] = set()         # edge IDs currently FALSE
 
-        # Propagation
-        self.prop_queue: deque[int] = deque()
-        self.reason_of: dict[int, list[int]] = {}  # implied lit -> reason clause (as stack)
+        self.assigned_at_level = [set()]  # for each level: list of literals assigned
+        self.assigned_positive = set()
+        self.assigned_negative = set()
 
-        # External clause queue (blocking, etc.)
-        self._ext_clauses: deque[list[int]] = deque()
-        self._cur_ext_clause: list[int] | None = None
+        self.reason = {}               # reason for propagated literals: lit -> list[int]
+        self.reason_at_level = [set()] # per level (to clear on backtrack)
+        self.queue = []                # literals queued for propagation
+        self.pending = []              # external clause from check_model()
 
-        # Stats
-        self.propagate_calls = 0
-        self.solutions = 0
+        self._cur_reason = {}          # lit -> current remaining lits to stream
+        self._cur_ext = []             # current external clause being streamed
 
-    # Build current n×n partial adjacency matrix
-    # Values: -1 = unset, 0 = false, 1 = true
-    def adj_matrix(self) -> List[List[int]]:
-        A = [[0 if i == j else -1 for j in range(self.n)] for i in range(self.n)]
-        m = self.n * (self.n - 1) // 2
-        for id_ in range(1, m + 1):
-            r, c = self.edges.id2edge[id_]
-            if id_ in self.pos_ids:
+    def adjMatrix(self):
+        A = [[0 for _ in range(self.n)] for _ in range(self.n)]
+        for i in vars_ids.keys():
+            r, c = vars_ids[i]
+            if i in self.assigned_positive:
                 A[r][c] = A[c][r] = 1
-            elif id_ in self.neg_ids:
+            elif i in self.assigned_negative:
                 A[r][c] = A[c][r] = 0
             else:
-                A[r][c] = A[c][r] = -1
+                A[r][c] = A[c][r] = None
         return A
 
-    # Try to derive a conflict/implication:
-    # Search for a permutation producing B_fp < A_fp (colex).
-    # The clause is: [+x for edges that are 0 in B] ∪ [-x for edges that are 1 in A],
-    # taken up to the first difference. Empty => undecidable yet.
-    def first_conflict_clause(self) -> list[int]:
-        A = self.adj_matrix()
+    # --- cadical_py -> observe variables
+    def setup_observe(self, solver):
+        for v in vars_ids:
+            solver.add_observed_var(v)
 
-        perm: list[int] = []
-        used = [False] * self.n
-        clause: list[int] = []
-
-        def dfs() -> bool:
-            k = len(perm)
-            base_idx = list(range(k))
-
-            A_ = permute_sub(A, base_idx)
-            B_ = permute_sub(A, perm)
-
-            # Unset handling: A optimistic (0), B pessimistic (1)
-            A_fp = replace_unset(fingerprint_colex(A_), 0)
-            B_fp = replace_unset(fingerprint_colex(B_), 1)
-
-            # Prune if B > A (no better permutation ahead)
-            if B_fp > A_fp:
-                return False
-
-            if k == self.n:
-                if B_fp < A_fp:
-                    ordA = colex_pairs(k)  # pairs over 0..k-1
-                    ordB = [(perm[i], perm[j]) for (i, j) in ordA]
-
-                    must_pos: set[int] = set()
-                    must_neg: set[int] = set()
-                    for l in range(len(B_fp)):
-                        if B_fp[l] == 0:
-                            idb = self.edges.id_of(ordB[l][0], ordB[l][1])
-                            must_pos.add(idb)
-                        if A_fp[l] == 1:
-                            ida = self.edges.id_of(ordA[l][0], ordA[l][1])
-                            must_neg.add(ida)
-                        if B_fp[l] != A_fp[l]:
-                            clause.clear()
-                            clause.extend(+x for x in must_pos)
-                            clause.extend(-x for x in must_neg)
-                            return True
-            else:
-                # Extend permutation
-                for v in range(self.n):
-                    if not used[v]:
-                        used[v] = True
-                        perm.append(v)
-                        if dfs():
-                            return True
-                        perm.pop()
-                        used[v] = False
-            return False
-
-        if dfs():
-            return clause
-        return []
-
-    # ---------- ExternalPropagator interface (duck-typed) ----------
-
-    def init(self, solver):
-        self.S = solver
+    # --- CaDiCaL ExternalPropagator callbacks (names adapted, logic unchanged) ---
 
     def notify_new_decision_level(self):
         self.level += 1
-        self.assigned_lits_at_level.append(set())
-        self.reason_lits_at_level.append(set())
+        self.assigned_at_level.append(set())
+        self.reason_at_level.append(set())
+        assert len(self.assigned_at_level) == self.level + 1
+        assert len(self.reason_at_level) == self.level + 1
 
-    def notify_backtrack(self, new_level: int):
-        while self.level > new_level:
-            for lit in self.assigned_lits_at_level[self.level]:
+    def notify_backtrack(self, to):
+        while self.level > to:
+            for lit in self.assigned_at_level[self.level]:
                 if lit > 0:
-                    self.pos_ids.discard(lit)
+                    self.assigned_positive.discard(lit)
                 else:
-                    self.neg_ids.discard(-lit)
-            self.assigned_lits_at_level.pop()
+                    self.assigned_negative.discard(-lit)
+            self.assigned_at_level.pop()
 
-            for lit in self.reason_lits_at_level[self.level]:
-                self.reason_of.pop(lit, None)
-            self.reason_lits_at_level.pop()
+            for lit in self.reason_at_level[self.level]:
+                self.reason.pop(lit, None)
+                self._cur_reason.pop(lit, None)
+            self.reason_at_level.pop()
 
             self.level -= 1
+        self.queue.clear()
+        self._cur_ext = []
 
-        # Drop scheduled propagations (solver will re-query)
-        self.prop_queue.clear()
-        self._cur_ext_clause = None
-
-    def notify_assignment(self, lits: List[int]):
+    # check partial assignment
+    def notify_assignment(self, lits):
         for lit in lits:
-            self.assigned_lits_at_level[self.level].add(lit)
+            assert lit not in self.assigned_positive and lit not in self.assigned_negative
+            self.assigned_at_level[self.level].add(lit)
             if lit > 0:
-                self.pos_ids.add(lit)
+                self.assigned_positive.add(lit)
             else:
-                self.neg_ids.add(-lit)
+                self.assigned_negative.add(-lit)
 
-        # Try to derive a symmetry cut as a unit implication
-        cls = self.first_conflict_clause()
-        if cls:
-            impl = cls[0]  # take first literal as unit implication (mirrors the C++ sample)
-            if impl not in self.reason_of:
-                self.prop_queue.append(impl)
-                # Store full reason clause as a stack (pop from the end)
-                self.reason_of[impl] = list(cls)[::-1]
-                self.reason_lits_at_level[self.level].add(impl)
+        for better_perm, must_be_positive, must_be_negative in minCheck(self.adjMatrix()):
+            assert (must_be_negative.issubset(self.assigned_positive))
+            assert (must_be_positive.issubset(self.assigned_negative))
+            conflict_clause = [+x for x in must_be_positive] + [-x for x in must_be_negative]
+            impl = conflict_clause[0]
+            self.queue.append(impl)
+            self.reason[impl] = list(conflict_clause)
+            self.reason_at_level[self.level].add(impl)
+            return
 
-    def cb_propagate(self) -> int:
-        if not self.prop_queue:
+    # return one implied lit (0 if none)
+    def cb_propagate(self):
+        if not self.queue:
             return 0
-        self.propagate_calls += 1
-        return self.prop_queue.popleft()
+        global propagate_calls
+        propagate_calls += 1
+        return self.queue.pop(0)
 
-    def cb_add_reason_clause_lit(self, propagated_lit: int) -> int:
-        cls = self.reason_of.get(propagated_lit)
-        if not cls:
-            self.reason_of.pop(propagated_lit, None)
+    # stream reason clause for a propagated literal
+    def cb_add_reason_clause_lit(self, propagated_lit):
+        if propagated_lit not in self._cur_reason:
+            cls = self.reason.pop(propagated_lit, [])
+            self._cur_reason[propagated_lit] = list(reversed(cls))  # stream via pop()
+        cur = self._cur_reason[propagated_lit]
+        if not cur:
+            self._cur_reason.pop(propagated_lit, None)
             return 0
-        lit = cls.pop()
-        if not cls:
-            self.reason_of.pop(propagated_lit, None)
-        return lit
+        return cur.pop()
 
-    def cb_decide(self) -> int:
-        return 0
+    # check full assignment
+    def cb_check_found_model(self, model):
+        global check_model_calls
+        check_model_calls += 1
+        
+        for _ in minCheck(self.adjMatrix()):
+            print("this should never happen! on_assignment should filter all invalid configurations!")
+            self.pending = [-l for l in model]
+            return False
 
-    def cb_check_found_model(self, model: List[int]) -> bool:
-        """
-        Called on SAT. Count solution and push a blocking clause into the external queue.
-        The model vector contains ±v at index v-1 for the observed main variables 1..m.
-        """
-        # Count solution
-        self.solutions += 1
-
-        # Build blocking clause (negate each assignment for the m main vars)
-        m = len(model)
-        block = [(- (i + 1)) if model[i] > 0 else (i + 1) for i in range(m)]
-        self._ext_clauses.append(block)  # streamed out via cb_has_external_clause / cb_add_external_clause_lit
         return True
 
-    # External clauses (blocking)
-    def cb_has_external_clause(self) -> tuple[bool, bool]:
-        # (has_clause, is_forgettable)
-        return (len(self._ext_clauses) > 0, True)
+    # external clause availability
+    def cb_has_external_clause(self):
+        return (len(self.pending) > 0, True)
 
-    def cb_add_external_clause_lit(self) -> int:
-        """
-        Stream the current external clause literal-by-literal; return 0 to terminate a clause.
-        """
-        if self._cur_ext_clause is None:
-            if not self._ext_clauses:
+    # stream external clause lits (0 terminates)
+    def cb_add_external_clause_lit(self):
+        if not self._cur_ext:
+            if not self.pending:
                 return 0
-            # Reverse so we can pop() from the end
-            self._cur_ext_clause = list(self._ext_clauses.popleft())[::-1]
+            self._cur_ext = list(reversed(self.pending))
+            self.pending = []
+        lit = self._cur_ext.pop()
+        if not self._cur_ext:
+            self._cur_ext = []
+            return 0
+        return lit
 
-        if not self._cur_ext_clause:
-            self._cur_ext_clause = None
-            return 0  # clause end
-        return self._cur_ext_clause.pop()
-
-
-# OEIS A000088 (number of unlabeled graphs), small values as a sanity check.
-EXPECTED_UNLABELED = [
-    1, 1, 2, 4, 11, 34, 156, 1044, 12346,
-    274668, 12005168, 1018997864, 165091172592,
-]
+    def cb_decide(self):
+        return 0
 
 
-def run_graph_enum(n: int) -> tuple[int, int]:
-    """
-    Build m = nC2 variables (edges), enumerate models and block each
-    via the propagator's external clause callbacks.
-    Returns: (solutions, propagate_calls).
-    """
-    if n < 0:
-        raise ValueError("n >= 0")
+solutions = []
+with Solver() as s:
+    p = GraphPropagator(n)
+    s.connect_external_propagator(p)
+    p.setup_observe(s)
 
-    m = n * (n - 1) // 2
-
-    S = cadical_py.Solver()
-    P = GraphProp(n)
-    S.connect_external_propagator(P)
-    P.init(S)
-
-    # Register observed variables; otherwise callbacks won't fire.
-    for v in range(1, m + 1):
-        S.add_observed_var(v)
-
+    # empty CNF
     while True:
-        code = S.solve()  # 10 = SAT, 20 = UNSAT
-        if code == 20:
+        res = s.solve()
+        if res == 20:
             break
-        if code != 10:
-            raise RuntimeError("UNKNOWN solver status")
-        # On SAT, cb_check_found_model() counted + queued the blocking clause.
+        if res != 10:
+            print("UNKNOWN")
+            break
 
-    # Optional sanity check
-    if 0 <= n < len(EXPECTED_UNLABELED):
-        assert P.solutions == EXPECTED_UNLABELED[n], (
-            f"unexpected count: {P.solutions} vs {EXPECTED_UNLABELED[n]} (OEIS A000088)"
-        )
+        model = s.model()
+        A = [[0 for _ in range(n)] for _ in range(n)]
+        for i in vars_ids:
+            r, c = vars_ids[i]
+            A[r][c] = A[c][r] = 1
+        solutions.append(A)
+        s.add_clause([-l for l in model if l != 0])
 
-    return P.solutions, P.propagate_calls
+print(f"{len(solutions)} solutions")
+if len(argv) > 2:
+    print(solutions)
 
+expected_count = [1, 1, 2, 4, 11, 34, 156, 1044, 12346, 274668, 12005168, 1018997864, 165091172592]  # OEIS A000088
+assert len(solutions) == expected_count[n]
 
-if __name__ == "__main__":
-    if len(sys.argv) == 2:
-        n = int(sys.argv[1])
-    else:
-        print(f"Usage: {sys.argv[0]} n [k]")
-        sys.exit(1)
-        
-    sols, calls = run_graph_enum(n)
-    print(f"{sols} solutions")
-    print(f"propagate_calls: {calls}")
+print(f"check_model_calls: {check_model_calls}")
+print(f"propagate_calls: {propagate_calls}")
